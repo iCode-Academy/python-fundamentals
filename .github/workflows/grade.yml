@@ -85,7 +85,7 @@ jobs:
           PYTHON
 
       - name: Report to LMS
-        if: steps.detect.outputs.exercise_found == 'true' && secrets.LMS_WEBHOOK_URL != ''
+        if: steps.detect.outputs.exercise_found == 'true'
         env:
           WEBHOOK_URL: ${{ secrets.LMS_WEBHOOK_URL }}
         run: |
