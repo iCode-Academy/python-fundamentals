@@ -1,0 +1,120 @@
+name: Auto-Grade Exercise
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'm*/**'  # Only trigger when module folders change
+      - '!.github/**'  # Ignore workflow changes
+
+jobs:
+  detect-and-grade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed exercise
+        id: detect
+        run: |
+          # Find which exercise folder changed
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -E '^m[0-9]' | head -1 || echo "")
+
+          if [ -z "$CHANGED" ]; then
+            echo "No exercise files changed"
+            echo "exercise_found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Extract module and exercise from path (e.g., m01-variables/e01-hello-world/solution.py)
+          MODULE=$(echo "$CHANGED" | cut -d'/' -f1)
+          EXERCISE=$(echo "$CHANGED" | cut -d'/' -f2)
+
+          if [ -z "$EXERCISE" ] || [[ ! "$EXERCISE" =~ ^e[0-9] ]]; then
+            echo "Changed file is not in an exercise folder"
+            echo "exercise_found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          EXERCISE_PATH="${MODULE}/${EXERCISE}"
+          EXERCISE_ID="${MODULE}-${EXERCISE}"
+
+          echo "Found changed exercise: $EXERCISE_ID at $EXERCISE_PATH"
+          echo "exercise_found=true" >> $GITHUB_OUTPUT
+          echo "exercise_id=$EXERCISE_ID" >> $GITHUB_OUTPUT
+          echo "exercise_path=$EXERCISE_PATH" >> $GITHUB_OUTPUT
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pytest
+        run: pip install pytest pytest-json-report
+
+      - name: Run tests
+        id: test
+        if: steps.detect.outputs.exercise_found == 'true'
+        working-directory: ${{ steps.detect.outputs.exercise_path }}
+        run: |
+          echo "Running tests for ${{ steps.detect.outputs.exercise_id }}"
+          pytest tests/ --json-report --json-report-file=results.json -v || true
+
+      - name: Parse results
+        id: results
+        if: steps.detect.outputs.exercise_found == 'true'
+        working-directory: ${{ steps.detect.outputs.exercise_path }}
+        run: |
+          python -c "
+import json
+import os
+try:
+    with open('results.json') as f:
+        data = json.load(f)
+    passed = data.get('summary', {}).get('passed', 0)
+    total = data.get('summary', {}).get('total', 0)
+    failed = total - passed
+    pct = round(passed / total * 100, 1) if total > 0 else 0
+except:
+    passed, failed, total, pct = 0, 0, 0, 0
+with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+    f.write(f'passed={passed}\n')
+    f.write(f'failed={failed}\n')
+    f.write(f'total={total}\n')
+    f.write(f'percentage={pct}\n')
+"
+
+
+      - name: Report to LMS
+        if: steps.detect.outputs.exercise_found == 'true'
+        env:
+          WEBHOOK_URL: "http://test-school.localhost:8000/lms/webhooks/grading/"
+          WEBHOOK_SECRET: ${{ secrets.LMS_WEBHOOK_SECRET }}
+        run: |
+          # Create payload
+          PAYLOAD=$(cat <<EOF
+          {
+            "exercise_id": "${{ steps.detect.outputs.exercise_id }}",
+            "repository": "${{ github.repository }}",
+            "commit_sha": "${{ github.sha }}",
+            "commit_message": "${{ github.event.head_commit.message }}",
+            "commit_url": "${{ github.event.head_commit.url }}",
+            "branch": "${{ github.ref_name }}",
+            "passed_tests": ${{ steps.results.outputs.passed || 0 }},
+            "failed_tests": ${{ steps.results.outputs.failed || 0 }},
+            "total_tests": ${{ steps.results.outputs.total || 0 }},
+            "percentage": ${{ steps.results.outputs.percentage || 0 }},
+            "github_username": "${{ github.actor }}"
+          }
+          EOF
+          )
+
+          # Send to LMS
+          curl -s -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: workflow_run" \
+            -d "$PAYLOAD"
+
+          echo "Results reported to LMS"
