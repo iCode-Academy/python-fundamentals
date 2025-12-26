@@ -58,6 +58,8 @@ jobs:
         if: steps.detect.outputs.exercise_found == 'true'
         continue-on-error: true
         working-directory: ${{ steps.detect.outputs.exercise_path }}
+	env:
+            PYTHONPATH: .
         run: |
           echo "Running tests for ${{ steps.detect.outputs.exercise_id }}"
           pytest tests/ --json-report --json-report-file=results.json -v || true
